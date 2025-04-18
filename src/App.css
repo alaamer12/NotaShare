@@ -1,0 +1,132 @@
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+.card {
+  padding: 2em;
+}
+
+.read-the-docs {
+  color: #888;
+}
+
+/* Add styles for the canvas and text boxes */
+
+.canvas-container {
+  user-select: none; /* Prevents text selection during drawing */
+  touch-action: none; /* Disables touch scrolling/zooming for better drawing */
+}
+
+.canvas-container canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+}
+
+.textbox {
+  position: absolute;
+  min-width: 100px;
+  min-height: 30px;
+  background-color: white;
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  cursor: text;
+  z-index: 2;
+  user-select: text; /* Allow text selection inside text boxes */
+}
+
+.textbox.selected {
+  border: 1px solid #9b87f5 !important;
+  box-shadow: 0 2px 5px rgba(155, 135, 245, 0.3) !important;
+}
+
+.resize-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background-color: #9b87f5;
+  border: 1px solid white;
+  border-radius: 50%;
+  cursor: nwse-resize;
+  z-index: 3;
+}
+
+.format-toolbar {
+  position: absolute;
+  display: flex;
+  background-color: white;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  padding: 4px;
+  z-index: 1000;
+}
+
+.format-toolbar.active {
+  display: flex;
+}
+
+.format-button {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 2px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.format-button:hover {
+  background-color: #f0f0f0;
+}
+
+/* Cursor styles */
+.canvas-container.pen {
+  cursor: crosshair;
+}
+
+.canvas-container.pan {
+  cursor: move;
+}
+
+.canvas-container.text {
+  cursor: text;
+}
+
+.canvas-container.select {
+  cursor: default;
+}
