@@ -62,7 +62,7 @@ export default {
 					border: 'hsl(var(--sidebar-border))',
 					ring: 'hsl(var(--sidebar-ring))'
 				},
-				sharenote: {
+				Notashare: {
 					primary: '#9b87f5',
 					secondary: '#7E69AB',
 					tertiary: '#6E59A5',

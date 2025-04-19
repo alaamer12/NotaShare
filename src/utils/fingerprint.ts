@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 
 // Local storage key for the fingerprint
-const FINGERPRINT_KEY = 'sharenote-fingerprint';
+const FINGERPRINT_KEY = 'Notashare-fingerprint';
 
 // Generate a simple fingerprint
 export const generateFingerprint = (): string => {

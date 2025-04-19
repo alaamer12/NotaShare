@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { Move } from 'lucide-react';
 
@@ -23,6 +23,27 @@ const PanningTool: React.FC<PanningToolProps> = ({
   const [initialPosition, setInitialPosition] = useState({ x: 0, y: 0 });
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isSpaceDown, setIsSpaceDown] = useState(false);
+  const [viewportDimensions, setViewportDimensions] = useState({ width: 0, height: 0 });
+  
+  // Calculate and update viewport dimensions
+  const updateViewportDimensions = useCallback(() => {
+    if (containerRef.current) {
+      const { width, height } = containerRef.current.getBoundingClientRect();
+      setViewportDimensions({ width, height });
+    }
+  }, []);
+
+  // Recalculate viewport on resize
+  useEffect(() => {
+    updateViewportDimensions();
+    
+    const handleResize = () => {
+      updateViewportDimensions();
+    };
+    
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [updateViewportDimensions]);
 
   // Handle space key down and up
   useEffect(() => {
@@ -104,6 +125,12 @@ const PanningTool: React.FC<PanningToolProps> = ({
     }
   };
 
+  // Calculate canvas size based on viewport
+  const canvasSize = {
+    width: Math.max(viewportDimensions.width * 3, 2000),
+    height: Math.max(viewportDimensions.height * 3, 2000)
+  };
+
   return (
     <div 
       ref={containerRef} 
@@ -120,12 +147,12 @@ const PanningTool: React.FC<PanningToolProps> = ({
         style={{
           transform: `translate(${offset.x}px, ${offset.y}px)`,
           transition: isPanning ? 'none' : 'transform 0.1s ease',
-          // Extended canvas size to support large drawings
-          width: '4000px',
-          height: '4000px',
+          // Dynamically sized canvas based on viewport
+          width: `${canvasSize.width}px`,
+          height: `${canvasSize.height}px`,
           // Center the canvas in the viewport
-          left: '-1500px',
-          top: '-1500px'
+          left: `-${(canvasSize.width - viewportDimensions.width) / 2}px`,
+          top: `-${(canvasSize.height - viewportDimensions.height) / 2}px`
         }}
       >
         {/* This is important - we create a centered viewport to contain
@@ -161,4 +188,4 @@ const PanningTool: React.FC<PanningToolProps> = ({
   );
 };
 
-export default PanningTool; 
+export default React.memo(PanningTool); 

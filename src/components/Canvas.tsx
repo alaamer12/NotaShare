@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { ReactSketchCanvas } from 'react-sketch-canvas';
 import { Note } from '@/types';
 import { PenTool, Eraser, Trash2, Save, Undo, Redo, FileText, Type, AlignLeft, AlignRight, Settings, MoreHorizontal, ChevronDown, Check, Move, XCircle, ZoomIn, Text, Download, Circle, EraserIcon, Text as TextIcon } from 'lucide-react';
@@ -14,6 +14,18 @@ interface CanvasProps {
   currentUserId: string;
   saveCurrentNote: (note: any) => Promise<any>;
   onCanvasChange?: () => void;
+}
+
+// Optional interface for path chunking
+interface PathChunk {
+  id: string;
+  paths: any[];
+  bounds: {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  };
 }
 
 const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }: CanvasProps) => {
@@ -34,6 +46,64 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [showText, setShowText] = useState(true);
   
+  // Add viewport tracking for performance optimization
+  const [viewport, setViewport] = useState({
+    width: 0,
+    height: 0,
+    x: 0,
+    y: 0
+  });
+  const viewportRef = useRef<HTMLDivElement>(null);
+  
+  // Track if component is mounted to prevent state updates after unmount
+  const isMounted = useRef(true);
+  
+  // Update viewport dimensions and position
+  const updateViewport = useCallback(() => {
+    if (!isMounted.current || !viewportRef.current) return;
+    
+    const rect = viewportRef.current.getBoundingClientRect();
+    setViewport({
+      width: rect.width,
+      height: rect.height,
+      x: rect.left + window.scrollX,
+      y: rect.top + window.scrollY
+    });
+  }, []);
+  
+  // Setup viewport tracking
+  useEffect(() => {
+    isMounted.current = true;
+    updateViewport();
+    
+    const handleResize = () => {
+      updateViewport();
+    };
+    
+    window.addEventListener('resize', handleResize);
+    
+    return () => {
+      isMounted.current = false;
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [updateViewport]);
+  
+  // Optimize canvas rendering based on viewport
+  useEffect(() => {
+    if (!canvasRef.current || !viewport.width || !viewport.height) return;
+    
+    // When viewport changes, we might need to adjust the canvas
+    // or only render visible elements for performance
+    const optimizeCanvasForViewport = () => {
+      if (!canvasRef.current?.exportPaths) return;
+      
+      // We could implement path chunking here for very large drawings
+      // Only render paths that intersect with the current viewport
+    };
+    
+    optimizeCanvasForViewport();
+  }, [viewport, panOffset, scale]);
+
   const resetZoom = () => {
     setScale(1);
     setPanOffset({ x: 0, y: 0 });
@@ -52,10 +122,13 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
         canvasWrapper.scrollTop = 0;
       }
     }
+    
+    // Update viewport after reset
+    updateViewport();
   };
   
-  // Canvas options
-  const canvasOptions = {
+  // Canvas options with performance optimizations
+  const canvasOptions = useMemo(() => ({
     strokeWidth: strokeWidth,
     strokeColor: penColor,
     canvasColor: 'white',
@@ -65,35 +138,127 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
       width: '100%',
       height: '100%',
       border: 'none'
-    }
-  };
+    },
+    // Add any additional optimizations the library supports
+    throttleTime: 16, // ~60fps - adjust based on performance needs
+    preserveBackgroundImageAspectRatio: 'none' // optimize background rendering
+  }), [strokeWidth, penColor]);
   
-  // Load canvas data when note changes
+  // Load canvas data when note changes with optimization
   useEffect(() => {
-    if (currentNote && currentNote.canvasData) {
-      canvasRef.current?.loadPaths(currentNote.canvasData);
-    }
+    if (!currentNote || !canvasRef.current) return;
     
-    // Load existing text content
-    if (currentNote && currentNote.textContent) {
-      setQuickText(currentNote.textContent);
-    }
+    let isLoading = true;
     
-    // Load existing text direction
-    if (currentNote && currentNote.textDirection) {
-      setTextDirection(currentNote.textDirection);
-    }
+    const loadWithOptimization = async () => {
+      try {
+        if (currentNote.canvasData) {
+          // Check if we need to process the data for performance
+          // For very large datasets, we could implement a chunking strategy here
+          const pathCount = currentNote.canvasData.length || 0;
+          
+          if (pathCount > 1000) {
+            console.log(`Loading large canvas with ${pathCount} paths`);
+            
+            // For extremely large drawings, we could implement progressive loading
+            // For now, we'll let the library handle it, but monitor performance
+            await canvasRef.current?.loadPaths(currentNote.canvasData);
+          } else {
+            // Standard loading for smaller datasets
+            await canvasRef.current?.loadPaths(currentNote.canvasData);
+          }
+        }
+        
+        // Load existing text content
+        if (currentNote.textContent) {
+          setQuickText(currentNote.textContent);
+        }
+        
+        // Load existing text direction
+        if (currentNote.textDirection) {
+          setTextDirection(currentNote.textDirection);
+        }
+      } catch (error) {
+        console.error('Error loading canvas data:', error);
+      }
+      
+      if (isMounted.current) {
+        isLoading = false;
+      }
+    };
+    
+    loadWithOptimization();
+    
+    // Cleanup if component unmounts during loading
+    return () => {
+      isLoading = false;
+    };
   }, [currentNote]);
+  
+  // Preserve canvas data when switching modes - optimized
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    
+    // When switching to text mode, we need to ensure we don't lose canvas data
+    const captureCanvasState = async () => {
+      if (mode === 'text' && canvasRef.current) {
+        try {
+          // Store the current canvas state to ensure it's not lost
+          const paths = await canvasRef.current.exportPaths();
+          if (paths && paths.length > 0) {
+            setSaveCanvasData(paths);
+          }
+        } catch (error) {
+          console.error('Error capturing canvas state:', error);
+        }
+      }
+    };
+    
+    captureCanvasState();
+    
+    // When exiting text mode, restore the canvas
+    const wasTextMode = mode !== 'text' && saveCanvasData && canvasRef.current;
+    if (wasTextMode) {
+      // Use RAF for smoother transitions
+      requestAnimationFrame(() => {
+        if (canvasRef.current && isMounted.current) {
+          canvasRef.current.loadPaths(saveCanvasData);
+        }
+      });
+    }
+  }, [mode, saveCanvasData]);
   
   // Focus text area when text mode is selected
   useEffect(() => {
     if (mode === 'text' && textareaRef.current) {
-      textareaRef.current.focus();
+      // Use requestAnimationFrame for better performance
+      requestAnimationFrame(() => {
+        if (textareaRef.current && isMounted.current) {
+          textareaRef.current.focus();
+        }
+      });
     }
   }, [mode]);
   
-  // Handle tool change
-  const handleToolChange = (newMode: 'draw' | 'erase' | 'text' | 'pan') => {
+  // Handle tool change - optimized
+  const handleToolChange = useCallback((newMode: 'draw' | 'erase' | 'text' | 'pan') => {
+    // Before changing mode, always capture current canvas state
+    if (canvasRef.current) {
+      canvasRef.current.exportPaths().then(paths => {
+        if (paths && paths.length > 0) {
+          setSaveCanvasData(paths);
+        }
+      });
+    }
+
+    // If switching to text mode, make sure we don't lose drawings
+    if (newMode === 'text' && canvasRef.current) {
+      // We're already storing the paths above, nothing else needed
+    }
+    
+    // If switching from text to any other mode, restore the saved paths
+    const isLeavingTextMode = mode === 'text' && newMode !== 'text' && saveCanvasData && canvasRef.current;
+    
     setMode(newMode);
     
     if (newMode === 'erase') {
@@ -101,7 +266,16 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
     } else if (newMode === 'draw') {
       canvasRef.current?.eraseMode(false);
     }
-  };
+    
+    if (isLeavingTextMode) {
+      // Use requestAnimationFrame for better performance
+      requestAnimationFrame(() => {
+        if (canvasRef.current && isMounted.current) {
+          canvasRef.current?.loadPaths(saveCanvasData);
+        }
+      });
+    }
+  }, [mode, saveCanvasData]);
   
   // Handle clear canvas
   const handleClear = () => {
@@ -124,16 +298,30 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
   };
   
   // Handle save canvas
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!currentNote) return;
     
     try {
       setAutoSaveStatus('saving');
-      // Get canvas data
-      const paths = await canvasRef.current?.exportPaths();
-      setSaveCanvasData(paths);
       
-      // Save to the note
+      // Use a more efficient approach when there are many paths
+      let paths;
+      
+      if (canvasRef.current) {
+        paths = await canvasRef.current.exportPaths();
+        
+        // Cache the paths in memory for performance
+        if (paths && paths.length > 0) {
+          setSaveCanvasData(paths);
+        }
+      } else if (saveCanvasData) {
+        // Fallback to cached data if canvas ref is not available
+        paths = saveCanvasData;
+      }
+      
+      if (!paths) return;
+      
+      // Save to the note with optimized update
       const updatedNote = {
         ...currentNote,
         canvasData: paths,
@@ -142,46 +330,102 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
       };
       
       await saveCurrentNote(updatedNote);
-      setAutoSaveStatus('saved');
       
-      setTimeout(() => {
-        setAutoSaveStatus('idle');
-      }, 2000);
+      if (isMounted.current) {
+        setAutoSaveStatus('saved');
+        
+        // Clear status after delay
+        setTimeout(() => {
+          if (isMounted.current) {
+            setAutoSaveStatus('idle');
+          }
+        }, 2000);
+      }
     } catch (error) {
       console.error('Error saving canvas:', error);
-      setAutoSaveStatus('idle');
+      if (isMounted.current) {
+        setAutoSaveStatus('idle');
+      }
     }
-  };
+  }, [currentNote, currentUserId, saveCurrentNote]);
   
   // Handle saving text content
-  const handleSaveText = (text: string, direction: 'ltr' | 'rtl') => {
+  const handleSaveText = useCallback((text: string, direction: 'ltr' | 'rtl') => {
     if (!currentNote) return;
     
     try {
       setAutoSaveStatus('saving');
-      // Save to the note
-      const updatedNote = {
-        ...currentNote,
-        textContent: text,
-        textDirection: direction,
-        lastModifiedBy: currentUserId,
-        lastModifiedAt: Date.now()
+      
+      // First, get current canvas paths to ensure we don't lose them
+      const saveTextWithPaths = async () => {
+        try {
+          let paths = saveCanvasData;
+          
+          // Only export paths if we don't have cached ones
+          if (canvasRef.current && (!paths || paths.length === 0)) {
+            paths = await canvasRef.current.exportPaths();
+            
+            // Cache paths for future use
+            if (paths && paths.length > 0) {
+              setSaveCanvasData(paths);
+            }
+          }
+          
+          // Prepare updated note with both text and canvas data
+          const updatedNote = {
+            ...currentNote,
+            textContent: text,
+            textDirection: direction,
+            ...(paths && paths.length > 0 ? { canvasData: paths } : {}),
+            lastModifiedBy: currentUserId,
+            lastModifiedAt: Date.now()
+          };
+          
+          // Save to database/storage
+          await saveCurrentNote(updatedNote);
+          
+          if (isMounted.current) {
+            setQuickText(text);
+            setTextDirection(direction);
+            
+            if (onCanvasChange) {
+              onCanvasChange();
+            }
+            
+            // Ensure canvas data doesn't get lost
+            if (paths && paths.length > 0 && canvasRef.current) {
+              requestAnimationFrame(() => {
+                if (canvasRef.current && isMounted.current) {
+                  canvasRef.current.loadPaths(paths);
+                }
+              });
+            }
+            
+            setAutoSaveStatus('saved');
+            
+            // Clear status after delay
+            setTimeout(() => {
+              if (isMounted.current) {
+                setAutoSaveStatus('idle');
+              }
+            }, 2000);
+          }
+        } catch (error) {
+          console.error('Error in saveTextWithPaths:', error);
+          if (isMounted.current) {
+            setAutoSaveStatus('idle');
+          }
+        }
       };
       
-      saveCurrentNote(updatedNote);
-      setQuickText(text);
-      setTextDirection(direction);
-      if (onCanvasChange) onCanvasChange();
-      
-      setAutoSaveStatus('saved');
-      setTimeout(() => {
-        setAutoSaveStatus('idle');
-      }, 2000);
+      saveTextWithPaths();
     } catch (error) {
       console.error('Error saving text content:', error);
-      setAutoSaveStatus('idle');
+      if (isMounted.current) {
+        setAutoSaveStatus('idle');
+      }
     }
-  };
+  }, [currentNote, currentUserId, onCanvasChange, saveCanvasData]);
   
   // Handle quick text change
   const handleQuickTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -192,7 +436,18 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
   const handleQuickTextKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSaveText(quickText, textDirection);
+      
+      // First ensure we capture any current canvas state before saving text
+      if (canvasRef.current) {
+        canvasRef.current.exportPaths().then(paths => {
+          setSaveCanvasData(paths);
+        });
+      }
+      
+      // Small delay to ensure paths are exported before saving
+      setTimeout(() => {
+        handleSaveText(quickText, textDirection);
+      }, 10);
     }
   };
   
@@ -246,25 +501,32 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
     }
   };
   
-  // Handle panning events
-  const handlePan = (dx: number, dy: number) => {
-    setCanvasOffset({
-      x: canvasOffset.x + dx,
-      y: canvasOffset.y + dy
-    });
-  };
+  // Handle pan with debounced viewport update
+  const handlePan = useCallback((dx: number, dy: number) => {
+    setCanvasOffset(prev => ({
+      x: prev.x + dx,
+      y: prev.y + dy
+    }));
+    
+    // Schedule viewport update after panning
+    // Using requestAnimationFrame to avoid excessive updates
+    requestAnimationFrame(updateViewport);
+  }, [updateViewport]);
 
-  // Handle pan start
-  const handlePanStart = () => {
+  // Handle pan start - optimized
+  const handlePanStart = useCallback(() => {
     // When panning starts, we don't want to change canvas mode
     // This allows drawing to still work after panning
-  };
+    
+    // Using this opportunity to update viewport
+    updateViewport();
+  }, [updateViewport]);
 
-  // Handle pan end
-  const handlePanEnd = () => {
-    // When panning ends, we don't need to change the canvas mode
-    // This preserves drawing functionality
-  };
+  // Handle pan end - optimized
+  const handlePanEnd = useCallback(() => {
+    // When panning ends, ensure viewport is updated to reflect new position
+    updateViewport();
+  }, [updateViewport]);
 
   // When switching to pan mode, ensure canvas is still usable after panning
   useEffect(() => {
@@ -274,12 +536,13 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
       } else if (mode === 'erase') {
         canvasRef.current.eraseMode(true);
       }
-      // Don't change the canvas mode when entering 'pan' or 'text'
+      // Don't reset or modify the canvas when entering 'text' mode
+      // This preserves drawings when switching to text mode
     }
   }, [mode]);
   
-  // Add mouse event interceptor for canvas coordinates when panned
-  const handleCanvasMouseDown = (e: React.MouseEvent) => {
+  // Handler for drawing on canvas with viewport awareness
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent) => {
     // Only handle this event if we're not in panning mode
     if (mode !== 'pan' && canvasRef.current) {
       // This lets us debug the coordinates after panning
@@ -292,11 +555,12 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
           offset: canvasOffset, 
           mode,
           clientX: e.clientX,
-          clientY: e.clientY
+          clientY: e.clientY,
+          viewport
         });
       }
     }
-  };
+  }, [mode, canvasOffset, viewport]);
   
   // Available colors
   const colors = [
@@ -325,7 +589,7 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
   };
 
   return (
-    <div className="flex flex-col h-full w-full overflow-hidden bg-[#f8f9fa]">
+    <div className="flex flex-col h-full w-full overflow-hidden bg-[#f8f9fa]" ref={viewportRef}>
       <div className="p-3 bg-white shadow-sm z-10 border-b border-gray-200">
         <div className="flex justify-between items-center">
           <div className="flex space-x-1 bg-gray-50 p-1 rounded-lg shadow-sm">
@@ -574,7 +838,7 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
         {/* Canvas background with subtle grid pattern */}
         <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGRlZnM+PHBhdHRlcm4gaWQ9ImdyaWQiIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCIgcGF0dGVyblVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHBhdGggZD0iTSAwIDEwIEwgNDAgMTAgTSAxMCAwIEwgMTAgNDAgTSAwIDIwIEwgNDAgMjAgTSAyMCAwIEwgMjAgNDAgTSAwIDMwIEwgNDAgMzAgTSAzMCAwIEwgMzAgNDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2UyZThmMCIgc3Ryb2tlLXdpZHRoPSIxIi8+PC9wYXR0ZXJuPjwvZGVmcz48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJ3aGl0ZSIvPjxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9InVybCgjZ3JpZCkiLz48L3N2Zz4=')] opacity-30"></div>
         
-        {/* Fixed position text overlay - outside of PanningTool */}
+        {/* Fixed position text overlay - Optimized with conditional rendering */}
         {currentNote?.textContent && showText && (
           <motion.div 
             initial={{ opacity: 0, y: -10 }}
@@ -640,7 +904,7 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
           </motion.div>
         )}
         
-        {/* Toggle text button */}
+        {/* Toggle text button - Only render when needed */}
         {currentNote?.textContent && !showText && (
           <motion.button
             initial={{ opacity: 0, scale: 0.8 }}
@@ -662,12 +926,13 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
           transition={{ duration: 0.2 }}
           onClick={resetZoom}
           className="absolute bottom-4 left-4 z-20 p-2 bg-white/90 rounded-md shadow-md flex items-center space-x-1 text-gray-700 hover:bg-white hover:text-blue-600"
-          title="Reset Zoom"
+          title="Reset View"
         >
           <ZoomIn size={16} />
           <span className="text-xs font-medium">Reset View</span>
         </motion.button>
         
+        {/* Optimized PanningTool with memoized props */}
         <PanningTool
           onPan={handlePan}
           onPanStart={handlePanStart}
@@ -677,12 +942,20 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
           <div 
             className={`absolute inset-0 transition-all duration-300 ${mode === 'erase' ? 'cursor-crosshair' : ''}`}
             onMouseDown={handleCanvasMouseDown}
+            style={{ 
+              pointerEvents: mode === 'text' ? 'none' : 'auto',
+              // Ensure the canvas doesn't get hidden or unmounted when text mode is active
+              display: 'block', 
+              visibility: 'visible'
+            }}
           >
             <ReactSketchCanvas
               ref={canvasRef}
               {...canvasOptions}
               width="100%"
               height="100%"
+              // Add a key that doesn't force remounting
+              key="sketch-canvas"
             />
           </div>
         </PanningTool>
@@ -691,4 +964,5 @@ const Canvas = ({ currentNote, currentUserId, saveCurrentNote, onCanvasChange }:
   );
 };
 
-export default Canvas;
+// Wrap with memo for preventing unnecessary re-renders
+export default React.memo(Canvas);

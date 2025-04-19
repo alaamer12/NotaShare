@@ -1,6 +1,6 @@
 import { Note, User, Stats } from '@/types';
 
-const DB_NAME = 'sharenote-db';
+const DB_NAME = 'Notashare-db';
 const DB_VERSION = 1;
 
 const STORES = {
