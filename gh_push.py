@@ -26,6 +26,8 @@ import json
 import urllib.request
 import urllib.error
 import socket
+import time
+import glob
 
 try:
     from rich.console import Console
@@ -515,130 +517,249 @@ def publish_to_gh_pages(update: bool = False) -> bool:
 
 
 def publish_using_git_fallback(source_branch: str) -> bool:
-    """Manual git-based approach to publish to GitHub Pages when gh CLI pages command is unavailable."""
+    """
+    Safe git-based approach to publish to GitHub Pages when gh CLI pages command is unavailable.
+    This approach preserves your working directory by using a separate worktree or temp directory.
+    """
     print_status(
-        "Using git-based GitHub Pages deployment", 
+        "Using safe git-based GitHub Pages deployment", 
         Status.INFO,
-        "This method will create/update the gh-pages branch."
+        "This will NOT affect your current project files."
     )
     
     # Store current branch to return to it later
     original_branch = source_branch
+    current_dir = os.getcwd()
     
-    # Create a temporary directory to store current content
-    temp_dir = tempfile.mkdtemp()
+    # Create a temporary directory outside the current project
+    deploy_dir = os.path.join(tempfile.gettempdir(), f"gh_pages_deploy_{int(time.time())}")
+    os.makedirs(deploy_dir, exist_ok=True)
+    
     try:
-        # Copy all web content to temp directory
-        # Exclude .git directory and other unnecessary files
-        web_files = ["index.html", "index.md", "README.md", "*.css", "*.js", "assets", "images", "img", "css", "js"]
-        found_files = False
-        
-        # Try to find and copy each web file/directory
-        for pattern in web_files:
-            # Get all matching files
-            import glob
-            matches = glob.glob(pattern, recursive=True)
-            
-            for match in matches:
-                if os.path.exists(match):
-                    found_files = True
-                    # Copy file or directory
-                    target_path = os.path.join(temp_dir, match)
-                    if os.path.isdir(match):
-                        shutil.copytree(match, target_path, dirs_exist_ok=True)
-                    else:
-                        # Make sure target directory exists
-                        os.makedirs(os.path.dirname(target_path) or temp_dir, exist_ok=True)
-                        shutil.copy2(match, target_path)
-        
-        if not found_files:
-            # If no web files found with specific patterns, copy everything except .git
-            for item in os.listdir('.'):
-                if item != '.git' and not item.startswith('.'):
-                    if os.path.isdir(item):
-                        shutil.copytree(item, os.path.join(temp_dir, item), dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(item, os.path.join(temp_dir, item))
-        
-        # Create or switch to gh-pages branch
-        # Check if branch exists locally
-        return_code, stdout, _ = run_command(["git", "branch", "--list", "gh-pages"], check=False)
-        branch_exists_locally = "gh-pages" in stdout
-        
-        # Check if branch exists remotely
+        # Check if we have a gh-pages branch already
         return_code, stdout, _ = run_command(["git", "ls-remote", "--heads", "origin", "gh-pages"], check=False)
         branch_exists_remotely = stdout.strip() != ""
         
-        if branch_exists_locally:
-            # Switch to existing branch
-            return_code, _, stderr = run_command(["git", "checkout", "gh-pages"])
-            if return_code != 0:
-                print_status("Failed to switch to gh-pages branch", Status.ERROR, stderr)
+        # Clone the repository to the temp directory if the branch exists
+        if branch_exists_remotely:
+            clone_cmd = ["git", "clone", "--branch", "gh-pages", "--single-branch", "--depth", "1"]
+            # Get the remote URL
+            ret_code, remote_url, _ = run_command(["git", "remote", "get-url", "origin"], check=False)
+            if ret_code != 0 or not remote_url:
+                print_status("Failed to get remote URL", Status.ERROR)
                 return False
-        else:
-            # Create orphan branch if it doesn't exist
-            return_code, _, stderr = run_command(["git", "checkout", "--orphan", "gh-pages"])
+                
+            clone_cmd.extend([remote_url, deploy_dir])
+            return_code, _, stderr = run_command(clone_cmd, check=False)
             if return_code != 0:
-                print_status("Failed to create gh-pages branch", Status.ERROR, stderr)
-                return False
-            
-            # Clear the working directory
-            run_command(["git", "rm", "-rf", "."], check=False)
+                # If clone fails, just create an empty directory
+                print_status(
+                    "Creating new gh-pages branch", 
+                    Status.INFO,
+                    "No existing gh-pages branch found or unable to clone it."
+                )
         
-        # Copy content from temp directory
-        for item in os.listdir(temp_dir):
-            source = os.path.join(temp_dir, item)
-            if os.path.isdir(source):
-                # If directory already exists, remove it
-                if os.path.exists(item):
-                    shutil.rmtree(item)
-                shutil.copytree(source, item)
+        # Change to the deployment directory
+        os.chdir(deploy_dir)
+        
+        # Initialize git if needed (if we didn't clone successfully)
+        if not os.path.exists(os.path.join(deploy_dir, ".git")):
+            init_cmd = ["git", "init"]
+            run_command(init_cmd)
+            
+            # Setup remote
+            ret_code, remote_url, _ = run_command(["git", "remote", "get-url", "origin"], cwd=current_dir, check=False)
+            if ret_code == 0 and remote_url:
+                run_command(["git", "remote", "add", "origin", remote_url])
+        
+        # Clear the directory contents (but keep .git)
+        for item in os.listdir(deploy_dir):
+            if item != ".git":
+                item_path = os.path.join(deploy_dir, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                else:
+                    os.remove(item_path)
+        
+        # Prepare files for GitHub Pages based on project type
+        print_status("Preparing files for GitHub Pages", Status.INFO)
+        
+        # Check if this is a React/Node.js project
+        package_json_path = os.path.join(current_dir, "package.json")
+        if os.path.exists(package_json_path):
+            # This is likely a React, Next.js, or similar project
+            print_status("Detected JavaScript/TypeScript project", Status.INFO)
+            
+            # Check if build directory exists (common for React)
+            build_dirs = ["build", "dist", "out", "public", ".next"]
+            build_dir = None
+            
+            for dir_name in build_dirs:
+                if os.path.exists(os.path.join(current_dir, dir_name)):
+                    build_dir = os.path.join(current_dir, dir_name)
+                    break
+            
+            if build_dir:
+                print_status(f"Copying from build directory: {os.path.basename(build_dir)}", Status.INFO)
+                # Copy build folder contents to deploy directory
+                for item in os.listdir(build_dir):
+                    src = os.path.join(build_dir, item)
+                    dst = os.path.join(deploy_dir, item)
+                    if os.path.isdir(src):
+                        shutil.copytree(src, dst)
+                    else:
+                        shutil.copy2(src, dst)
             else:
-                shutil.copy2(source, item)
+                # If no build directory, suggest running build command
+                print_status(
+                    "No build directory found", 
+                    Status.WARNING,
+                    "You may need to build your project first with 'npm run build' or similar command."
+                )
+                
+                # Copy needed files based on project structure
+                # Only copy files that are commonly used in web projects
+                web_files = [
+                    "index.html", "404.html", "*.css", "*.js", "assets/**", 
+                    "images/**", "img/**", "css/**", "js/**", "fonts/**", "media/**"
+                ]
+                
+                for pattern in web_files:
+                    for filepath in glob.glob(os.path.join(current_dir, pattern), recursive=True):
+                        if os.path.isfile(filepath):
+                            rel_path = os.path.relpath(filepath, current_dir)
+                            dst_path = os.path.join(deploy_dir, rel_path)
+                            os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                            shutil.copy2(filepath, dst_path)
+        else:
+            # For non-Node projects or simple websites
+            # Copy only web-related files
+            print_status("Copying web files", Status.INFO)
+            web_files = [
+                "index.html", "index.md", "README.md", "404.html",
+                "*.css", "*.js", "assets/**", "images/**", "img/**", 
+                "css/**", "js/**", "fonts/**", "media/**"
+            ]
+            
+            for pattern in web_files:
+                for filepath in glob.glob(os.path.join(current_dir, pattern), recursive=True):
+                    if os.path.isfile(filepath):
+                        rel_path = os.path.relpath(filepath, current_dir)
+                        dst_path = os.path.join(deploy_dir, rel_path)
+                        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                        shutil.copy2(filepath, dst_path)
+        
+        # Create an index.html file if it doesn't exist
+        if not os.path.exists(os.path.join(deploy_dir, "index.html")):
+            # Check for README.md to convert
+            if os.path.exists(os.path.join(deploy_dir, "README.md")):
+                print_status(
+                    "Creating index.html from README.md", 
+                    Status.INFO
+                )
+                with open(os.path.join(deploy_dir, "README.md"), 'r', encoding='utf-8') as readme:
+                    content = readme.read()
+                
+                with open(os.path.join(deploy_dir, "index.html"), 'w', encoding='utf-8') as index:
+                    index.write(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Pages</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }}
+        h1, h2, h3 {{ color: #0366d6; }}
+        pre {{ background-color: #f6f8fa; padding: 16px; border-radius: 6px; overflow: auto; }}
+        code {{ font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace; }}
+    </style>
+</head>
+<body>
+    <div id="content">
+        <!-- README content will be displayed here -->
+        <h1>GitHub Pages</h1>
+        <p>This page was automatically generated from README.md</p>
+        <pre>{content}</pre>
+    </div>
+</body>
+</html>""")
+            else:
+                # Create a basic index.html
+                print_status(
+                    "Creating basic index.html", 
+                    Status.INFO
+                )
+                with open(os.path.join(deploy_dir, "index.html"), 'w', encoding='utf-8') as f:
+                    f.write("""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Pages Project</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1 { color: #0366d6; }
+    </style>
+</head>
+<body>
+    <h1>Welcome to GitHub Pages</h1>
+    <p>This is a basic page created by the GitHub Pages Publisher script.</p>
+    <p>Edit this file to customize your site.</p>
+</body>
+</html>""")
+        
+        # Setup git user info if needed (copy from main repo)
+        ret_code, name, _ = run_command(["git", "config", "user.name"], cwd=current_dir, check=False)
+        if ret_code == 0 and name:
+            run_command(["git", "config", "user.name", name.strip()])
+            
+        ret_code, email, _ = run_command(["git", "config", "user.email"], cwd=current_dir, check=False)
+        if ret_code == 0 and email:
+            run_command(["git", "config", "user.email", email.strip()])
+        
+        # Create .nojekyll file to bypass Jekyll processing
+        with open(os.path.join(deploy_dir, ".nojekyll"), 'w') as f:
+            pass
         
         # Add all files
-        return_code, _, stderr = run_command(["git", "add", "."])
-        if return_code != 0:
-            print_status("Failed to add files", Status.ERROR, stderr)
-            return False
+        run_command(["git", "add", "."])
         
         # Commit changes
-        return_code, _, stderr = run_command([
+        run_command([
             "git", "commit", "-m", "Update GitHub Pages content"
         ], check=False)
         
-        # Even if commit fails (e.g., no changes), continue
+        # Push to gh-pages branch
+        push_cmd = ["git", "push", "origin"]
+        if branch_exists_remotely:
+            push_cmd.append("HEAD:gh-pages")
+        else:
+            push_cmd.extend(["HEAD:gh-pages", "--force"])
         
-        # Push to remote
-        push_command = ["git", "push", "origin", "gh-pages"]
-        if not branch_exists_remotely:
-            push_command.append("--set-upstream")
+        return_code, stdout, stderr = run_command(push_cmd)
         
-        return_code, _, stderr = run_command(push_command)
         if return_code != 0:
-            print_status("Failed to push gh-pages branch", Status.ERROR, stderr)
+            print_status("Failed to push to gh-pages branch", Status.ERROR, stderr)
             return False
         
-        # Switch back to original branch
-        return_code, _, stderr = run_command(["git", "checkout", original_branch])
-        if return_code != 0:
-            print_status(
-                f"Failed to switch back to {original_branch} branch", 
-                Status.WARNING, 
-                f"Stayed on gh-pages branch. {stderr}"
-            )
-        
-        print_status("Successfully published to GitHub Pages using git", Status.SUCCESS)
+        print_status(
+            "Successfully published to GitHub Pages", 
+            Status.SUCCESS,
+            "Your site should be available shortly at https://yourusername.github.io/yourrepo"
+        )
         return True
         
     except Exception as e:
         print_status("Error during git-based deployment", Status.ERROR, str(e))
-        # Try to switch back to original branch
-        run_command(["git", "checkout", original_branch], check=False)
         return False
     finally:
-        # Clean up temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        # Always return to the original directory
+        os.chdir(current_dir)
+        # Clean up temp directory after successful deployment
+        try:
+            shutil.rmtree(deploy_dir, ignore_errors=True)
+        except:
+            pass
 
 
 def commit_changes() -> bool:
