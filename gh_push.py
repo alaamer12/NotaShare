@@ -161,7 +161,26 @@ def get_gh_installation_instructions() -> str:
 
 def is_gh_authenticated() -> bool:
     """Check if GitHub CLI is authenticated."""
-    return_code, _, _ = run_command(["gh", "auth", "status"], check=False)
+    return_code, _, stderr = run_command(["gh", "auth", "status"], check=False)
+    
+    # Handle unknown command error
+    if return_code != 0 and "unknown command" in stderr and "auth" in stderr:
+        # Fallback: try to check if git is configured with GitHub credentials
+        ret_code, stdout, _ = run_command(["git", "config", "--get", "github.token"], check=False)
+        if ret_code == 0 and stdout.strip():
+            return True
+            
+        # Also check if user has git credentials configured, which might indicate they're authenticated
+        ret_code, stdout, _ = run_command(["git", "config", "--get", "user.name"], check=False)
+        has_name = ret_code == 0 and stdout.strip()
+        
+        ret_code, stdout, _ = run_command(["git", "config", "--get", "user.email"], check=False)
+        has_email = ret_code == 0 and stdout.strip()
+        
+        # If they have both name and email configured, assume they might be authenticated
+        # This is not a perfect check but better than nothing
+        return has_name and has_email
+        
     return return_code == 0
 
 
@@ -173,8 +192,25 @@ def authenticate_gh() -> bool:
         "You'll be guided through the authentication process."
     )
     
-    return_code, _, _ = run_command(["gh", "auth", "login"])
-    return return_code == 0
+    return_code, _, stderr = run_command(["gh", "auth", "login"], check=False)
+    
+    # Handle unknown command error
+    if return_code != 0:
+        if "unknown command" in stderr and "auth" in stderr:
+            print_status(
+                "GitHub CLI 'auth' command not available in this version", 
+                Status.ERROR,
+                "Please upgrade your GitHub CLI or authenticate manually:\n"
+                "1. Create a Personal Access Token at https://github.com/settings/tokens\n"
+                "2. Configure git with: git config --global github.token YOUR_TOKEN\n"
+                "3. Set up your credentials with: git config --global user.name \"Your Name\"\n"
+                "   git config --global user.email \"your.email@example.com\""
+            )
+        else:
+            print_status("Authentication failed", Status.ERROR, stderr)
+        return False
+    
+    return True
 
 
 def check_git_repo() -> bool:
@@ -265,32 +301,61 @@ def setup_remote() -> bool:
             cmd.extend(["--description", description])
         cmd.append("--source=.")
         
-        return_code, _, stderr = run_command(cmd)
+        return_code, stdout, stderr = run_command(cmd)
+        
+        # Handle unknown command error
         if return_code != 0:
-            print_status(f"Failed to create repository", Status.ERROR, stderr)
-            return False
+            if "unknown command" in stderr and "repo" in stderr:
+                print_status(
+                    "GitHub CLI 'repo create' command not available in this version", 
+                    Status.INFO,
+                    "Falling back to manual repository creation method."
+                )
+                # Fallback to manual repository creation
+                print_status(
+                    "Manual repository creation instructions:", 
+                    Status.INFO,
+                    "1. Go to https://github.com/new\n"
+                    "2. Create a new repository named: " + repo_name + "\n"
+                    "3. Follow the instructions on GitHub to push an existing repository"
+                )
+                
+                # Ask user to enter the repo URL after they've created it
+                if Confirm.ask("Have you created the repository on GitHub?"):
+                    return setup_remote_manual()
+                
+                return False
+            else:
+                print_status(f"Failed to create repository", Status.ERROR, stderr)
+                return False
+                
         return True
     
     if choice == "link":
-        # Get remote URL from user
-        repo_url = Prompt.ask("Enter the GitHub repository URL")
-        
-        # Clean up URL if needed
-        # Handle browser URLs like https://github.com/username/repo
-        if "github.com" in repo_url and not repo_url.endswith(".git"):
-            if not "//" in repo_url:
-                repo_url = f"https://github.com/{repo_url}"
-            if not repo_url.endswith(".git"):
-                repo_url = f"{repo_url}.git"
-        
-        # Add remote
-        return_code, _, stderr = run_command(["git", "remote", "add", "origin", repo_url])
-        if return_code != 0:
-            print_status(f"Failed to add remote", Status.ERROR, stderr)
-            return False
-        return True
+        return setup_remote_manual()
     
     return False
+
+
+def setup_remote_manual() -> bool:
+    """Set up a remote repository manually by asking for the URL."""
+    # Get remote URL from user
+    repo_url = Prompt.ask("Enter the GitHub repository URL")
+    
+    # Clean up URL if needed
+    # Handle browser URLs like https://github.com/username/repo
+    if "github.com" in repo_url and not repo_url.endswith(".git"):
+        if not "//" in repo_url:
+            repo_url = f"https://github.com/{repo_url}"
+        if not repo_url.endswith(".git"):
+            repo_url = f"{repo_url}.git"
+    
+    # Add remote
+    return_code, _, stderr = run_command(["git", "remote", "add", "origin", repo_url])
+    if return_code != 0:
+        print_status(f"Failed to add remote", Status.ERROR, stderr)
+        return False
+    return True
 
 
 def check_web_files() -> Tuple[bool, List[str]]:
@@ -397,6 +462,7 @@ def check_existing_gh_pages(user_name: str, repo_name: str) -> bool:
 
 def publish_to_gh_pages(update: bool = False) -> bool:
     """Publish the project to GitHub Pages."""
+    # First try using gh pages command (newer versions)
     cmd = ["gh", "pages", "deploy"]
     
     # Add current branch if we can determine it
@@ -409,9 +475,19 @@ def publish_to_gh_pages(update: bool = False) -> bool:
     
     return_code, stdout, stderr = run_command(cmd)
     
+    # Check if the command succeeded
     if return_code == 0:
         print_status("Successfully published to GitHub Pages", Status.SUCCESS, stdout)
         return True
+    # If command failed because 'pages' subcommand doesn't exist
+    elif "unknown command" in stderr and "pages" in stderr:
+        print_status(
+            "GitHub CLI 'pages' command not available", 
+            Status.INFO,
+            "Falling back to manual git-based deployment"
+        )
+        return publish_using_git_fallback(branch)
+    # Other errors
     else:
         print_status("Failed to publish to GitHub Pages", Status.ERROR, stderr)
         
@@ -436,6 +512,133 @@ def publish_to_gh_pages(update: bool = False) -> bool:
             )
         
         return False
+
+
+def publish_using_git_fallback(source_branch: str) -> bool:
+    """Manual git-based approach to publish to GitHub Pages when gh CLI pages command is unavailable."""
+    print_status(
+        "Using git-based GitHub Pages deployment", 
+        Status.INFO,
+        "This method will create/update the gh-pages branch."
+    )
+    
+    # Store current branch to return to it later
+    original_branch = source_branch
+    
+    # Create a temporary directory to store current content
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Copy all web content to temp directory
+        # Exclude .git directory and other unnecessary files
+        web_files = ["index.html", "index.md", "README.md", "*.css", "*.js", "assets", "images", "img", "css", "js"]
+        found_files = False
+        
+        # Try to find and copy each web file/directory
+        for pattern in web_files:
+            # Get all matching files
+            import glob
+            matches = glob.glob(pattern, recursive=True)
+            
+            for match in matches:
+                if os.path.exists(match):
+                    found_files = True
+                    # Copy file or directory
+                    target_path = os.path.join(temp_dir, match)
+                    if os.path.isdir(match):
+                        shutil.copytree(match, target_path, dirs_exist_ok=True)
+                    else:
+                        # Make sure target directory exists
+                        os.makedirs(os.path.dirname(target_path) or temp_dir, exist_ok=True)
+                        shutil.copy2(match, target_path)
+        
+        if not found_files:
+            # If no web files found with specific patterns, copy everything except .git
+            for item in os.listdir('.'):
+                if item != '.git' and not item.startswith('.'):
+                    if os.path.isdir(item):
+                        shutil.copytree(item, os.path.join(temp_dir, item), dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, os.path.join(temp_dir, item))
+        
+        # Create or switch to gh-pages branch
+        # Check if branch exists locally
+        return_code, stdout, _ = run_command(["git", "branch", "--list", "gh-pages"], check=False)
+        branch_exists_locally = "gh-pages" in stdout
+        
+        # Check if branch exists remotely
+        return_code, stdout, _ = run_command(["git", "ls-remote", "--heads", "origin", "gh-pages"], check=False)
+        branch_exists_remotely = stdout.strip() != ""
+        
+        if branch_exists_locally:
+            # Switch to existing branch
+            return_code, _, stderr = run_command(["git", "checkout", "gh-pages"])
+            if return_code != 0:
+                print_status("Failed to switch to gh-pages branch", Status.ERROR, stderr)
+                return False
+        else:
+            # Create orphan branch if it doesn't exist
+            return_code, _, stderr = run_command(["git", "checkout", "--orphan", "gh-pages"])
+            if return_code != 0:
+                print_status("Failed to create gh-pages branch", Status.ERROR, stderr)
+                return False
+            
+            # Clear the working directory
+            run_command(["git", "rm", "-rf", "."], check=False)
+        
+        # Copy content from temp directory
+        for item in os.listdir(temp_dir):
+            source = os.path.join(temp_dir, item)
+            if os.path.isdir(source):
+                # If directory already exists, remove it
+                if os.path.exists(item):
+                    shutil.rmtree(item)
+                shutil.copytree(source, item)
+            else:
+                shutil.copy2(source, item)
+        
+        # Add all files
+        return_code, _, stderr = run_command(["git", "add", "."])
+        if return_code != 0:
+            print_status("Failed to add files", Status.ERROR, stderr)
+            return False
+        
+        # Commit changes
+        return_code, _, stderr = run_command([
+            "git", "commit", "-m", "Update GitHub Pages content"
+        ], check=False)
+        
+        # Even if commit fails (e.g., no changes), continue
+        
+        # Push to remote
+        push_command = ["git", "push", "origin", "gh-pages"]
+        if not branch_exists_remotely:
+            push_command.append("--set-upstream")
+        
+        return_code, _, stderr = run_command(push_command)
+        if return_code != 0:
+            print_status("Failed to push gh-pages branch", Status.ERROR, stderr)
+            return False
+        
+        # Switch back to original branch
+        return_code, _, stderr = run_command(["git", "checkout", original_branch])
+        if return_code != 0:
+            print_status(
+                f"Failed to switch back to {original_branch} branch", 
+                Status.WARNING, 
+                f"Stayed on gh-pages branch. {stderr}"
+            )
+        
+        print_status("Successfully published to GitHub Pages using git", Status.SUCCESS)
+        return True
+        
+    except Exception as e:
+        print_status("Error during git-based deployment", Status.ERROR, str(e))
+        # Try to switch back to original branch
+        run_command(["git", "checkout", original_branch], check=False)
+        return False
+    finally:
+        # Clean up temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def commit_changes() -> bool:
@@ -526,8 +729,13 @@ def check_gh_latest_version() -> None:
         # Only proceed with update check if we're not on Windows, as updating on Windows
         # typically requires admin privileges and is better handled through package managers
         if not is_windows():
-            return_code, stdout, _ = run_command(["gh", "update", "--check"], check=False)
-            if return_code == 0 and "new version" in stdout.lower():
+            return_code, stdout, stderr = run_command(["gh", "update", "--check"], check=False)
+            
+            # Handle unknown command error
+            if return_code != 0 and "unknown command" in stderr and "update" in stderr:
+                # Skip update check for older versions that don't support it
+                pass
+            elif return_code == 0 and "new version" in stdout.lower():
                 print_status(
                     "A new version of GitHub CLI is available", 
                     Status.INFO,
@@ -538,10 +746,28 @@ def check_gh_latest_version() -> None:
 def configure_gh_pages_source() -> bool:
     """Configure the GitHub Pages source branch if needed."""
     # Check current GitHub Pages configuration
-    return_code, stdout, _ = run_command(["gh", "api", "repos/:owner/:repo/pages"], check=False)
+    return_code, stdout, stderr = run_command(["gh", "api", "repos/:owner/:repo/pages"], check=False)
     
-    # If Pages aren't configured yet, or if there's an error, we'll set them up
+    # If gh api command not available or fails
     if return_code != 0:
+        # Check if it's because the command is not available
+        if "unknown command" in stderr and "api" in stderr:
+            print_status(
+                "GitHub CLI API command not available in this version", 
+                Status.INFO,
+                "Skipping automated configuration. Please configure GitHub Pages in repository settings."
+            )
+            print_status(
+                "Configuration instructions", 
+                Status.INFO,
+                "1. Go to your repository on GitHub\n"
+                "2. Navigate to Settings > Pages\n"
+                "3. Under 'Source', select branch 'gh-pages'\n"
+                "4. Click Save"
+            )
+            return True
+        
+        # If Pages aren't configured yet, or if there's an error, we'll set them up
         # Get the current branch
         branch = get_current_branch()
         
